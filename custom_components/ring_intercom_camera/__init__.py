@@ -50,7 +50,21 @@ def _patch_ring_other() -> None:
         streams = _get_streams(self)
 
         async def _close_callback():
-            await self.close_webrtc_stream(session_id)
+            # RingWebRtcStream invokes this from inside its own _close()
+            # while still running as part of its reader() task (Ring-side
+            # close messages are handled synchronously in that task). Only
+            # drop our bookkeeping entry here - do NOT call stream.close()
+            # again: _close() is already tearing the stream down, and a
+            # second close() call recurses into a second _close() that
+            # awaits self.read_task from within that very task, which
+            # asyncio rejects with "Task cannot await on itself". That
+            # nested failure also skips the outer _close()'s own
+            # ping_task/websocket cleanup, since it aborts the callback it
+            # was awaiting. close_webrtc_stream() (which does call
+            # stream.close()) is still used for externally-triggered closes
+            # (e.g. the browser hanging up via close_webrtc_session), which
+            # run outside the reader task and don't hit this.
+            streams.pop(session_id, None)
 
         stream = RingWebRtcStream(
             self._ring,
