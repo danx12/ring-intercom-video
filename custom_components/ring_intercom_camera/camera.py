@@ -59,10 +59,16 @@ async def async_setup_platform(
     for entry in ring_entries:
         ring_data = getattr(entry, "runtime_data", None)
         if ring_data is None:
+            _LOGGER.warning(
+                "Ring config entry %s has no runtime_data yet "
+                "(state=%s) — skipping intercom discovery for it this time",
+                entry.entry_id, entry.state,
+            )
             continue
 
         try:
             devices = ring_data.devices
+            other_kinds = [device.kind for device in devices.other]
             for device in devices.other:
                 if device.kind == "intercom_handset_video":
                     _LOGGER.info(
@@ -70,6 +76,12 @@ async def async_setup_platform(
                         device.name, device.device_api_id,
                     )
                     entities.append(RingIntercomCamera(device))
+            if not any(kind == "intercom_handset_video" for kind in other_kinds):
+                _LOGGER.warning(
+                    "No intercom_handset_video device found in Ring entry %s; "
+                    "'other' devices seen: %s",
+                    entry.entry_id, other_kinds or "(none)",
+                )
         except Exception:
             _LOGGER.exception("Error discovering Ring Intercom Video devices")
 
@@ -158,9 +170,12 @@ class RingIntercomCamera(Camera):
         try:
             from aiortc import RTCPeerConnection, RTCSessionDescription
         except ImportError:
-            _LOGGER.error(
-                "aiortc not available — snapshot capture requires aiortc. "
-                "It should be installed automatically via requirements."
+            _LOGGER.debug(
+                "aiortc not installed — snapshot capture is unavailable. "
+                "aiortc is an optional dependency (not auto-installed) because "
+                "its required `av` version range conflicts with the `av` "
+                "version pinned by some Home Assistant Core releases. Live "
+                "WebRTC streaming does not need aiortc and is unaffected."
             )
             return None
 
