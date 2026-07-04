@@ -7,19 +7,16 @@ Two modes of operation:
 
 2. SNAPSHOT (server-side WebRTC) — camera.snapshot service or
    async_camera_image() triggers a server-side WebRTC connection
-   using aiortc, captures a stabilized video frame, returns JPEG.
-   Works from automations without needing a browser open.
+   using aiortc (run in an isolated venv, see venv_snapshot.py),
+   captures a stabilized video frame, returns JPEG. Works from
+   automations without needing a browser open.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
-from io import BytesIO
 from typing import Any
-
-from ring_doorbell.webrtcstream import RingWebRtcMessage
 
 from homeassistant.components.camera import (
     Camera,
@@ -33,14 +30,12 @@ from homeassistant.components.camera import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from ring_doorbell.webrtcstream import RingWebRtcMessage
 
 _LOGGER = logging.getLogger(__name__)
 
 # Server-side snapshot capture settings
-SNAPSHOT_MAX_FRAMES = 75         # Max frames to examine (~3s at 25fps)
-SNAPSHOT_BRIGHTNESS_THRESHOLD = 25  # Min brightness to consider "real" video
-SNAPSHOT_STABILIZE_FRAMES = 5    # Consecutive bright frames before capture
-SNAPSHOT_CACHE_SECONDS = 10      # Don't re-capture within this window
+SNAPSHOT_CACHE_SECONDS = 10  # Don't re-capture within this window
 
 
 async def async_setup_platform(
@@ -67,7 +62,8 @@ async def async_setup_platform(
                 if device.kind == "intercom_handset_video":
                     _LOGGER.info(
                         "Found Ring Intercom Video: %s (id: %s)",
-                        device.name, device.device_api_id,
+                        device.name,
+                        device.device_api_id,
                     )
                     entities.append(RingIntercomCamera(device))
         except Exception:
@@ -144,7 +140,8 @@ class RingIntercomCamera(Camera):
                 self._last_image_time = time.time()
                 _LOGGER.debug(
                     "Snapshot captured for %s (%d bytes)",
-                    self._device.name, len(image),
+                    self._device.name,
+                    len(image),
                 )
         except Exception:
             _LOGGER.exception("Snapshot capture failed for %s", self._device.name)
@@ -154,18 +151,16 @@ class RingIntercomCamera(Camera):
         return self._last_image
 
     async def _capture_snapshot(self) -> bytes | None:
-        """Server-side WebRTC snapshot using aiortc."""
-        try:
-            from aiortc import RTCPeerConnection, RTCSessionDescription
-        except ImportError:
-            _LOGGER.debug(
-                "aiortc not installed — snapshot capture is unavailable. "
-                "aiortc is an optional dependency (not auto-installed) because "
-                "its required `av` version range conflicts with the `av` "
-                "version pinned by some Home Assistant Core releases. Live "
-                "WebRTC streaming does not need aiortc and is unaffected."
-            )
-            return None
+        """Server-side WebRTC snapshot, captured in an isolated venv.
+
+        aiortc requires an `av` version range that can conflict with the
+        exact `av` version some Home Assistant Core releases pin for their
+        own camera/stream stack. To avoid touching HA's own environment, the
+        actual WebRTC decode runs as a subprocess against a dedicated venv
+        (see venv_snapshot.py) — only ticket-fetching, which needs this
+        entity's authenticated Ring session, happens here.
+        """
+        import uuid
 
         from ring_doorbell.const import (
             APP_API_URI,
@@ -173,13 +168,17 @@ class RingIntercomCamera(Camera):
             RTC_STREAMING_WEB_SOCKET_ENDPOINT,
         )
 
-        import json
-        import ssl
-        import uuid
+        from . import venv_snapshot
 
-        from websockets.asyncio.client import connect as ws_connect
+        config_dir = self.hass.config.config_dir
 
-        # 1. Get signaling ticket
+        if not await venv_snapshot.ensure_ready(config_dir):
+            _LOGGER.debug(
+                "Snapshot venv not ready — skipping this capture attempt "
+                "(setup may still be in progress; see earlier log entries)."
+            )
+            return None
+
         try:
             resp = await self._device._ring.async_query(
                 RTC_STREAMING_TICKET_ENDPOINT,
@@ -191,158 +190,10 @@ class RingIntercomCamera(Camera):
             _LOGGER.debug("Failed to get WebRTC ticket", exc_info=True)
             return None
 
-        # 2. Setup peer connection
-        pc = RTCPeerConnection()
-        snapshot_data: dict[str, bytes | None] = {"image": None}
-        capture_done = asyncio.Event()
-
-        @pc.on("track")
-        async def on_track(track):
-            if track.kind != "video":
-                return
-
-            frame_count = 0
-            best_frame = None
-            best_brightness = 0.0
-            bright_streak = 0
-            prev_brightness = 0.0
-
-            try:
-                while frame_count < SNAPSHOT_MAX_FRAMES:
-                    frame = await asyncio.wait_for(track.recv(), timeout=10)
-                    frame_count += 1
-
-                    img = frame.to_image()
-                    w, h = img.size
-                    # Sample 9 points for brightness
-                    points = [
-                        (w // 4, h // 4), (w // 2, h // 4), (3 * w // 4, h // 4),
-                        (w // 4, h // 2), (w // 2, h // 2), (3 * w // 4, h // 2),
-                        (w // 4, 3 * h // 4), (w // 2, 3 * h // 4), (3 * w // 4, 3 * h // 4),
-                    ]
-                    total = sum(sum(img.getpixel(p)) / 3 for p in points)
-                    brightness = total / len(points)
-
-                    if brightness > best_brightness:
-                        best_brightness = brightness
-                        best_frame = img
-
-                    # Wait for stabilized frame
-                    if brightness > SNAPSHOT_BRIGHTNESS_THRESHOLD:
-                        bright_streak += 1
-                        if (
-                            bright_streak >= SNAPSHOT_STABILIZE_FRAMES
-                            and prev_brightness > 0
-                            and abs(brightness - prev_brightness)
-                            < brightness * 0.15
-                        ):
-                            best_frame = img
-                            break
-                    else:
-                        bright_streak = 0
-
-                    prev_brightness = brightness
-
-            except asyncio.TimeoutError:
-                _LOGGER.debug("Frame timeout after %d frames", frame_count)
-            except Exception as exc:
-                _LOGGER.debug("Frame capture error: %s", exc)
-
-            if best_frame:
-                buf = BytesIO()
-                best_frame.save(buf, "JPEG", quality=85)
-                snapshot_data["image"] = buf.getvalue()
-
-            capture_done.set()
-
-        pc.addTransceiver("video", direction="recvonly")
-        pc.addTransceiver("audio", direction="recvonly")
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-
-        # 3. WebSocket signaling
         ws_uri = RTC_STREAMING_WEB_SOCKET_ENDPOINT.format(uuid.uuid4(), ticket)
-        dialog_id = str(uuid.uuid4())
-        session_id = None
-
-        ssl_ctx = ssl.create_default_context()
-
-        try:
-            async with ws_connect(
-                ws_uri,
-                user_agent_header="android:com.ringapp",
-                ssl=ssl_ctx,
-            ) as ws:
-                await ws.send(json.dumps({
-                    "method": "live_view",
-                    "dialog_id": dialog_id,
-                    "body": {
-                        "doorbot_id": self._device.device_api_id,
-                        "stream_options": {
-                            "audio_enabled": False,
-                            "video_enabled": True,
-                        },
-                        "sdp": pc.localDescription.sdp,
-                        "type": "offer",
-                    },
-                }))
-
-                start = time.time()
-                while time.time() - start < 20 and not capture_done.is_set():
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                        msg = json.loads(raw)
-                        method = msg.get("method", "")
-                        body = msg.get("body", {})
-
-                        if method == "sdp":
-                            sdp = body.get("sdp", "")
-                            if sdp:
-                                await pc.setRemoteDescription(
-                                    RTCSessionDescription(
-                                        sdp=sdp, type="answer"
-                                    )
-                                )
-                        elif method == "session_created":
-                            session_id = body.get("session_id")
-                        elif (
-                            method == "notification"
-                            and body.get("text") == "camera_connected"
-                        ):
-                            if session_id:
-                                await ws.send(json.dumps({
-                                    "method": "activate_session",
-                                    "dialog_id": dialog_id,
-                                    "body": {
-                                        "doorbot_id": self._device.device_api_id,
-                                        "session_id": session_id,
-                                    },
-                                }))
-                        elif method == "close":
-                            break
-                    except asyncio.TimeoutError:
-                        if capture_done.is_set():
-                            break
-
-                # Clean close
-                try:
-                    await ws.send(json.dumps({
-                        "method": "close",
-                        "dialog_id": dialog_id,
-                        "body": {
-                            "session_id": session_id or "",
-                            "reason": {"code": 0, "text": ""},
-                        },
-                    }))
-                except Exception:
-                    pass
-
-        except Exception:
-            _LOGGER.debug("WebRTC signaling error", exc_info=True)
-        finally:
-            await pc.close()
-
-        return snapshot_data["image"]
+        return await venv_snapshot.capture(
+            config_dir, ws_uri, self._device.device_api_id
+        )
 
     # ---- Live stream (browser WebRTC signaling bridge) ----
 
@@ -364,7 +215,9 @@ class RingIntercomCamera(Camera):
                 msg = ring_msg.error_message or ""
                 _LOGGER.debug(
                     "WebRTC %s: error after %dms: %s",
-                    session_id, _ms(), msg,
+                    session_id,
+                    _ms(),
+                    msg,
                 )
                 send_message(WebRTCError(ring_msg.error_code, msg))
             elif ring_msg.answer:
@@ -372,7 +225,8 @@ class RingIntercomCamera(Camera):
                     timing["answer"] = True
                     _LOGGER.debug(
                         "WebRTC %s: Ring answer received after %dms",
-                        session_id, _ms(),
+                        session_id,
+                        _ms(),
                     )
                 send_message(WebRTCAnswer(ring_msg.answer))
             elif ring_msg.candidate:
@@ -380,7 +234,8 @@ class RingIntercomCamera(Camera):
                     timing["candidate"] = True
                     _LOGGER.debug(
                         "WebRTC %s: first Ring ICE candidate after %dms",
-                        session_id, _ms(),
+                        session_id,
+                        _ms(),
                     )
                 send_message(
                     WebRTCCandidate(
@@ -397,7 +252,8 @@ class RingIntercomCamera(Camera):
         )
         _LOGGER.debug(
             "WebRTC %s: generate_async_webrtc_stream returned after %dms",
-            session_id, _ms(),
+            session_id,
+            _ms(),
         )
 
     async def async_on_webrtc_candidate(

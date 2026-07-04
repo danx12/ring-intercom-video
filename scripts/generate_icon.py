@@ -20,7 +20,12 @@ LENS_MID = (45, 65, 90, 255)
 LENS_HIGHLIGHT = (200, 230, 255, 230)
 WHITE = (255, 255, 255, 255)
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "custom_components" / "ring_intercom_camera" / "brand"
+OUT_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "ring_intercom_camera"
+    / "brand"
+)
 
 
 def _rounded_square(size: int, radius_ratio: float = 0.22, fill=WHITE) -> Image.Image:
@@ -31,8 +36,18 @@ def _rounded_square(size: int, radius_ratio: float = 0.22, fill=WHITE) -> Image.
     return img
 
 
-def _circle(draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int, fill, outline=None, width: int = 0) -> None:
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fill, outline=outline, width=width)
+def _circle(
+    draw: ImageDraw.ImageDraw,
+    cx: int,
+    cy: int,
+    r: int,
+    fill,
+    outline=None,
+    width: int = 0,
+) -> None:
+    draw.ellipse(
+        (cx - r, cy - r, cx + r, cy + r), fill=fill, outline=outline, width=width
+    )
 
 
 def build_icon(size: int) -> Image.Image:

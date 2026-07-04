@@ -19,6 +19,8 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import discovery
 
+from . import venv_snapshot
+
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "ring_intercom_camera"
@@ -44,9 +46,9 @@ def _patch_ring_other() -> None:
             self._webrtc_streams = {}
         return self._webrtc_streams
 
-    async def generate_async_webrtc_stream(self, sdp_offer, session_id,
-                                            on_message_callback, *,
-                                            keep_alive_timeout=60 * 5):
+    async def generate_async_webrtc_stream(
+        self, sdp_offer, session_id, on_message_callback, *, keep_alive_timeout=60 * 5
+    ):
         streams = _get_streams(self)
 
         async def _close_callback():
@@ -92,6 +94,7 @@ def _patch_ring_other() -> None:
         stream = streams.pop(session_id, None)
         if stream:
             stream.sync_close()
+
     RingOther.generate_async_webrtc_stream = generate_async_webrtc_stream
     RingOther.on_webrtc_candidate = on_webrtc_candidate
     RingOther.close_webrtc_stream = close_webrtc_stream
@@ -105,6 +108,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     _patch_ring_other()
+
+    # Warm up the isolated snapshot venv in the background so it's ready
+    # before the first real capture is needed (e.g. the first doorbell ring).
+    hass.async_create_task(venv_snapshot.ensure_ready(hass.config.config_dir))
 
     hass.async_create_task(
         discovery.async_load_platform(hass, Platform.CAMERA, DOMAIN, {}, config)

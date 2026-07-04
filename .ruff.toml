@@ -1,0 +1,24 @@
+# Mirrors the ruleset used by home-assistant/core and the community
+# integration_blueprint, trimmed to rules relevant for a small integration.
+target-version = "py314"
+
+[lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "SIM",              # simplify
+    "ASYNC",            # async-specific pitfalls
+    "C4",               # comprehensions
+    "PIE",
+    "RUF",
+]
+
+ignore = [
+    "COM812",  # incompatible with formatter
+    "ISC001",  # incompatible with formatter
+]
+
+[lint.mccabe]
+max-complexity = 25

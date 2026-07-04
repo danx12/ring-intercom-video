@@ -167,18 +167,24 @@ This component:
 2. 🎥 **Creates a camera entity** with `CameraEntityFeature.STREAM` that implements the HA WebRTC signaling interface (`async_handle_async_webrtc_offer`, `async_on_webrtc_candidate`, `close_webrtc_session`)
 3. 🛰️ Uses `python-ring-doorbell`'s `RingWebRtcStream` for all signaling — no custom WebSocket/HTTP code needed
 
-### 📷 About the optional server-side snapshot feature
+### 📷 About the server-side snapshot feature
 
 `camera.snapshot` / `async_camera_image()` support (capturing a still frame
 server-side, for use in automations without a browser open) uses `aiortc`.
-`aiortc` is **not** listed as a hard dependency in `manifest.json` — every
-released `aiortc` version pins a specific `av` version range, and this can
-conflict with the `av` version some Home Assistant Core releases pin for
-their own camera/stream stack, which would otherwise make the *entire
-integration* fail to load over one optional feature. If `aiortc` happens to
-already be importable in your HA environment, snapshot capture works
-automatically; if not, it silently no-ops (see debug logs) and the live
-WebRTC view in Lovelace is unaffected either way.
+Every released `aiortc` version pins a specific `av` version range, and this
+can conflict with the exact `av` version some Home Assistant Core releases
+pin for their own camera/stream stack — installing aiortc directly into HA's
+environment risks pip downgrading that shared `av` (breaking core streaming)
+or failing outright if the two requirements are unsatisfiable together.
+
+To avoid that, `aiortc` and a compatible `av` are installed into a **dedicated
+venv** under your HA config directory (`ring_intercom_camera_venv/`), created
+automatically in the background the first time the integration loads. The
+actual WebRTC decode runs as a subprocess against that venv's interpreter —
+HA's own site-packages (and its `av` pin) are never touched. First-time setup
+can take a minute or more (aiortc has native extensions); until it completes,
+snapshot capture silently no-ops (see debug logs) and the live WebRTC view in
+Lovelace — which doesn't need aiortc — is unaffected either way.
 
 ---
 
@@ -203,9 +209,10 @@ WebRTC view in Lovelace is unaffected either way.
 - Use Nabu Casa, a reverse proxy with Let's Encrypt, or a native HA HTTPS certificate
 - Also make sure you're using the [companion card](https://github.com/cmos486/ring-intercom-video-card) — built‑in HA camera cards do not implement two‑way audio
 
-**❓ Server-side snapshot always returns nothing / debug log says "aiortc not installed"**
-- Expected on Home Assistant installations where `aiortc`'s required `av` version conflicts with the one Core pins — see [Technical details](#-about-the-optional-server-side-snapshot-feature)
-- The live WebRTC view (the main feature of this integration) does **not** depend on `aiortc` and is unaffected
+**❓ Server-side snapshot always returns nothing / debug log says "venv not ready"**
+- The isolated snapshot venv is set up automatically in the background on first load and can take a minute or more (aiortc has native extensions) — see [Technical details](#-about-the-server-side-snapshot-feature)
+- Check `custom_components.ring_intercom_camera` debug logs for setup progress or errors
+- The live WebRTC view (the main feature of this integration) does **not** depend on this venv and is unaffected
 
 **❓ Ring Protect subscription**
 - **Not required.** This component uses WebRTC live view which works without any subscription

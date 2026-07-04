@@ -7,6 +7,13 @@ build/
 *.swp
 *.swo
 
+# pixi (pixi.lock is committed for reproducibility, per pixi convention)
+.pixi/
+
+# pytest / local non-live HA (pixi task "develop")
+.pytest_cache/
+config/
+
 # Claude
 .claude/
 .claude*

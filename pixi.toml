@@ -1,0 +1,61 @@
+[workspace]
+name = "ring-intercom-video"
+description = "Dev/CI environment for the Ring Intercom Video Camera HA integration"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
+
+[dependencies]
+python = "3.14.*"
+# HA Core's own camera/stream stack requirements (homeassistant/components/
+# stream/manifest.json). Taken from conda-forge (prebuilt, no pkg-config/
+# compiler toolchain needed) rather than PyPI. This is HA's own dependency,
+# unrelated to — and never mixed into — aiortc's isolated venv
+# (venv_snapshot.py), which stays out of this dev/test environment entirely.
+pyturbojpeg = "*"
+av = "*"
+numpy = "==2.3.2"
+pillow = "==12.2.0"
+pre-commit = "*"
+
+# homeassistant, pytest, and pytest-asyncio come in transitively via
+# pytest-homeassistant-custom-component's own pins. Don't re-pin them here —
+# a mismatched pin is exactly the kind of dependency conflict this project
+# has been bitten by before (see custom_components/.../venv_snapshot.py).
+[pypi-dependencies]
+pytest-homeassistant-custom-component = "==0.13.344"
+ruff = "==0.15.7"
+# Pulled in at test time only, to satisfy the stock `ring` integration's own
+# dependency on HA core's `ffmpeg` component (unrelated to this project's
+# aiortc/av isolation — ha-ffmpeg has no native-extension version conflicts).
+ha-ffmpeg = "==3.2.2"
+# Pinned to exactly what HA Core 2026.7.0's own `ring` integration requires
+# (homeassistant/components/ring/manifest.json) — this is also the version
+# this integration's monkey-patching (see __init__.py:_patch_ring_other) and
+# imports (ring_doorbell.webrtcstream, .other, .const) target directly.
+ring-doorbell = "==0.9.14"
+
+[tasks]
+# Local dev convenience — formats and auto-fixes in place.
+lint = { cmd = """
+    python -m py_compile custom_components/ring_intercom_camera/*.py scripts/*.py &&
+    ruff format . &&
+    ruff check . --fix &&
+    python -c \"import json; json.load(open('custom_components/ring_intercom_camera/manifest.json'))\" &&
+    python -c \"import json; json.load(open('hacs.json'))\"
+""" }
+# CI / pre-commit — fails instead of silently rewriting files.
+lint-check = { cmd = """
+    python -m py_compile custom_components/ring_intercom_camera/*.py scripts/*.py &&
+    ruff format . --check &&
+    ruff check . &&
+    python -c \"import json; json.load(open('custom_components/ring_intercom_camera/manifest.json'))\" &&
+    python -c \"import json; json.load(open('hacs.json'))\"
+""" }
+test = "pytest"
+install-hooks = "pre-commit install"
+develop = """
+    bash -c '
+    if [ ! -d "$PWD/config" ]; then mkdir -p "$PWD/config" && hass --config "$PWD/config" --script ensure_config; fi &&
+    PYTHONPATH="$PYTHONPATH:$PWD/custom_components" hass --config "$PWD/config" --debug
+    '
+"""
